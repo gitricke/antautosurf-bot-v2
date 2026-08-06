@@ -60,7 +60,6 @@ phash_db = carica_database()
 print(f"📊 Database phash: {len(phash_db)} hash")
 
 async def risolvi_captcha(page, email):
-    """Sistema avanzato di risoluzione captcha"""
     html = await page.content()
     
     if "Please Click Similar" not in html:
@@ -68,12 +67,10 @@ async def risolvi_captcha(page, email):
     
     log(email, "⚠️ CAPTCHA RILEVATO!")
     
-    # 1. Estrai tutti i CID disponibili
     cids = [int(x) for x in re.findall(r'cid=(\d+)', html)]
     cids_unici = list(set(cids))
     log(email, f"   📌 CID disponibili: {cids_unici}")
     
-    # 2. Prova ogni CID
     for cid in cids_unici:
         await page.goto(f"https://antautosurf.com/index.php?cid={cid}")
         await asyncio.sleep(2)
@@ -82,7 +79,6 @@ async def risolvi_captcha(page, email):
             log(email, f"   ✅ CAPTCHA RISOLTO! CID: {cid}")
             return True
     
-    # 3. Se nessuno funziona, prova con PHASH
     try:
         img_element = await page.query_selector('img[src*="capimg.php"]')
         if img_element:
@@ -95,7 +91,6 @@ async def risolvi_captcha(page, email):
             phash = imagehash.phash(img_pil)
             phash_str = str(phash)
             
-            # Cerca nel database
             for stored_phash, cid in phash_db.items():
                 try:
                     diff = imagehash.hex_to_hash(phash_str) - imagehash.hex_to_hash(stored_phash)
@@ -117,8 +112,6 @@ async def risolvi_captcha(page, email):
 # ============================================================
 
 async def login_con_retry(page, email, password):
-    """Login con tentativi automatici"""
-    
     for tentativo in range(MAX_RETRY):
         log(email, f"📧 Tentativo login {tentativo+1}/{MAX_RETRY}")
         
@@ -132,7 +125,6 @@ async def login_con_retry(page, email, password):
             
             html = await page.content()
             
-            # REGISTRAZIONE (se necessario)
             if "Set Login Password" in html:
                 log(email, "📝 Nuovo account! Registro...")
                 await page.fill('input[name="password"]', password)
@@ -145,14 +137,12 @@ async def login_con_retry(page, email, password):
                     log(email, "   ✅ Password impostata!")
                     continue
             
-            # LOGIN CON PASSWORD
             html = await page.content()
             if "Please enter Password" in html:
                 await page.fill('input[name="password"]', password)
                 await page.click('input[value="Enter"]')
                 await asyncio.sleep(3)
             
-            # Verifica login
             html = await page.content()
             if "Please enter Password" not in html and "Set Login Password" not in html:
                 log(email, "✅ Login completato!")
@@ -170,13 +160,10 @@ async def login_con_retry(page, email, password):
 # ============================================================
 
 async def surf_cycle(page, email, ciclo):
-    """Esegue un ciclo di surf per un account"""
-    
     log(email, f"🔄 CICLO {ciclo}")
     
-    # Invia richiesta
     await page.goto(f"https://antautosurf.com/surf.php?wallet={email}")
-    await asyncio.sleep(0)  # Cede il controllo!
+    await asyncio.sleep(0)
     
     page_text = await page.content()
     
@@ -193,7 +180,6 @@ async def surf_cycle(page, email, ciclo):
     
     log(email, f"   📢 Annuncio! Timer: {time_val}s")
     
-    # ASPETTA IL TIMER SENZA BLOCCARE
     for i in range(time_val, 0, -1):
         print(f"[{email[:10]}] ⏳ {i}s", end="\r")
         await asyncio.sleep(0)
@@ -208,14 +194,11 @@ async def surf_cycle(page, email, ciclo):
 # ============================================================
 
 async def gestisci_account(account_data, proxy_manager):
-    """Gestisce un singolo account con proxy manager"""
-    
     email = account_data["email"]
     password = account_data["password"]
     
     log(email, "🚀 Avvio account...")
     
-    # 1. Assegna proxy
     proxy_str = await proxy_manager.assegna_proxy(email)
     if not proxy_str:
         log(email, "❌ Nessun proxy disponibile!")
@@ -240,35 +223,28 @@ async def gestisci_account(account_data, proxy_manager):
         page = await context.new_page()
         
         try:
-            # Login con retry
             if not await login_con_retry(page, email, password):
                 await proxy_manager.rilascia_proxy(proxy_str, successo=False)
                 return
             
-            # Dashboard
             await page.goto(f"https://antautosurf.com/index.php?bitcoinwallet={email}&ref=")
             await asyncio.sleep(0)
             
-            # Captcha
             await risolvi_captcha(page, email)
             
-            # Balance
             html = await page.content()
             balance_match = re.search(r'btoday["\']?\s*[=:]\s*([\d.]+)', html)
             if balance_match:
                 log(email, f"💰 Balance: {balance_match.group(1)}")
             
-            # CSRF
             csrf_match = re.search(r'csrf_token=([a-f0-9]+)', html)
             csrf = csrf_match.group(1) if csrf_match else ""
             
-            # Ciclo di surf
             ciclo = 0
             while True:
                 ciclo += 1
                 await surf_cycle(page, email, ciclo)
                 
-                # Ogni 5 cicli, ricarica dashboard
                 if ciclo % 5 == 0:
                     log(email, f"🔄 Ricarico dashboard (ciclo {ciclo})")
                     await page.goto(f"https://antautosurf.com/index.php?bitcoinwallet={email}&ref=")
@@ -290,7 +266,6 @@ async def main():
     print("🚀 BOT V2 - 6 ACCOUNT ASINCRONO-SEQUENZIALE")
     print("="*60)
     
-    # 1. Carica account
     accounts = carica_accounts()
     if not accounts:
         print("❌ Nessun account trovato!")
@@ -300,13 +275,11 @@ async def main():
     print(f"🔇 Headless: {HEADLESS}")
     print("="*60)
     
-    # 2. Proxy Manager
     proxy_manager = ProxyManager("proxy_pool.json")
     stats = await proxy_manager.ottieni_statistiche()
     print(f"📊 Proxy disponibili: {stats['disponibili']}/{stats['totale']}")
     print("="*60)
     
-    # 3. LOOP SEQUENZIALE ASINCRONO
     while True:
         for account in accounts:
             await gestisci_account(account, proxy_manager)
