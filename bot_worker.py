@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# bot_worker.py - BOT V2 con 6 account asincrono-sequenziale
+# bot_worker.py - BOT V2 con 6 account asincrono-sequenziale (UN CICLO PER ACCOUNT)
 
 import asyncio
 import json
@@ -156,11 +156,13 @@ async def login_con_retry(page, email, password):
     return False
 
 # ============================================================
-# SURF CYCLE
+# SURF CYCLE - UN SINGOLO CICLO
 # ============================================================
 
-async def surf_cycle(page, email, ciclo):
-    log(email, f"🔄 CICLO {ciclo}")
+async def surf_cycle(page, email):
+    """Esegue un singolo ciclo di surf per un account"""
+    
+    log(email, f"🔄 CICLO")
     
     await page.goto(f"https://antautosurf.com/surf.php?wallet={email}")
     await asyncio.sleep(0)
@@ -190,10 +192,12 @@ async def surf_cycle(page, email, ciclo):
     return True
 
 # ============================================================
-# GESTISCI ACCOUNT
+# GESTISCI ACCOUNT - UN SINGOLO CICLO
 # ============================================================
 
 async def gestisci_account(account_data, proxy_manager):
+    """Gestisce un singolo account per UN CICLO di surf"""
+    
     email = account_data["email"]
     password = account_data["password"]
     
@@ -237,18 +241,12 @@ async def gestisci_account(account_data, proxy_manager):
             if balance_match:
                 log(email, f"💰 Balance: {balance_match.group(1)}")
             
-            csrf_match = re.search(r'csrf_token=([a-f0-9]+)', html)
-            csrf = csrf_match.group(1) if csrf_match else ""
+            # ============================================================
+            # 🔥 ESEGUE UN SINGOLO CICLO DI SURF
+            # ============================================================
+            await surf_cycle(page, email)
             
-            ciclo = 0
-            while True:
-                ciclo += 1
-                await surf_cycle(page, email, ciclo)
-                
-                if ciclo % 5 == 0:
-                    log(email, f"🔄 Ricarico dashboard (ciclo {ciclo})")
-                    await page.goto(f"https://antautosurf.com/index.php?bitcoinwallet={email}&ref=")
-                    await asyncio.sleep(0)
+            log(email, "✅ Ciclo completato, passo al prossimo account")
                     
         except Exception as e:
             log(email, f"❌ Errore: {e}")
@@ -258,12 +256,12 @@ async def gestisci_account(account_data, proxy_manager):
             await proxy_manager.rilascia_proxy(proxy_str, successo=True)
 
 # ============================================================
-# MAIN
+# MAIN - LOOP INFINITO CON ROTAZIONE ACCOUNT
 # ============================================================
 
 async def main():
     print("="*60)
-    print("🚀 BOT V2 - 6 ACCOUNT ASINCRONO-SEQUENZIALE")
+    print("🚀 BOT V2 - 6 ACCOUNT (UN CICLO PER ACCOUNT)")
     print("="*60)
     
     accounts = carica_accounts()
@@ -279,7 +277,10 @@ async def main():
     stats = await proxy_manager.ottieni_statistiche()
     print(f"📊 Proxy disponibili: {stats['disponibili']}/{stats['totale']}")
     print("="*60)
+    print("🔄 Modalità: un ciclo per account, poi rotazione")
+    print("="*60)
     
+    # 🔥 LOOP INFINITO - ROTAZIONE ACCOUNT
     while True:
         for account in accounts:
             await gestisci_account(account, proxy_manager)
