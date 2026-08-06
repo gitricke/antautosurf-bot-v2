@@ -1,6 +1,6 @@
 FROM python:3.11-bookworm
 
-# Installa dipendenze di sistema per Playwright (versione Debian Bookworm)
+# Installa dipendenze di sistema per Playwright (Debian Bookworm)
 RUN apt-get update && apt-get install -y \
     libgl1 \
     libglib2.0-0 \
@@ -21,11 +21,11 @@ RUN apt-get update && apt-get install -y \
     libasound2 \
     libatk1.0-0 \
     libgtk-3-0 \
-    libgdk-pixbuf2.0-0 \
-    libjpeg-turbo8 \
+    libgdk-pixbuf-2.0-0 \
+    libjpeg62-turbo \
     libicu72 \
     libwebp7 \
-    libvpx8 \
+    libvpx7 \
     libenchant-2-2 \
     && rm -rf /var/lib/apt/lists/*
 
