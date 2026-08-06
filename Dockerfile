@@ -27,6 +27,10 @@ RUN apt-get update && apt-get install -y \
     libwebp7 \
     libvpx7 \
     libenchant-2-2 \
+    libgbm1 \
+    libxkbcommon0 \
+    libpango-1.0-0 \
+    libcairo2 \
     && rm -rf /var/lib/apt/lists/*
 
 # Installa dipendenze Python
