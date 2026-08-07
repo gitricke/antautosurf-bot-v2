@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 # bot_worker.py - BOT V2 con 6 account asincrono-sequenziale (UN CICLO PER ACCOUNT)
+# SISTEMA CAPTCHA CONDIVISO - salva sempre le soluzioni nel JSON
 
 import asyncio
 import json
@@ -46,7 +47,7 @@ def parse_proxy(proxy_str):
         return None
 
 # ============================================================
-# SISTEMA CAPTCHA AUTO-APPRENDENTE
+# SISTEMA CAPTCHA AUTO-APPRENDENTE CON SALVATAGGIO
 # ============================================================
 
 def carica_database():
@@ -60,6 +61,7 @@ phash_db = carica_database()
 print(f"📊 Database phash: {len(phash_db)} hash")
 
 async def risolvi_captcha(page, email):
+    """Sistema avanzato di risoluzione captcha con salvataggio automatico"""
     html = await page.content()
     
     if "Please Click Similar" not in html:
@@ -67,18 +69,26 @@ async def risolvi_captcha(page, email):
     
     log(email, "⚠️ CAPTCHA RILEVATO!")
     
+    # 1. Estrai tutti i CID disponibili
     cids = [int(x) for x in re.findall(r'cid=(\d+)', html)]
     cids_unici = list(set(cids))
     log(email, f"   📌 CID disponibili: {cids_unici}")
     
+    # 2. Prova ogni CID
     for cid in cids_unici:
         await page.goto(f"https://antautosurf.com/index.php?cid={cid}")
         await asyncio.sleep(2)
         html_test = await page.content()
         if "Please Click Similar" not in html_test:
             log(email, f"   ✅ CAPTCHA RISOLTO! CID: {cid}")
+            # 🔥 SALVA SUBITO NEL DATABASE!
+            phash_db[str(cid)] = cid
+            with open("hash_phash_db.json", "w") as f:
+                json.dump(phash_db, f, indent=2)
+            log(email, f"   💾 CID {cid} salvato nel database!")
             return True
     
+    # 3. Se nessun CID funziona, prova con PHASH
     try:
         img_element = await page.query_selector('img[src*="capimg.php"]')
         if img_element:
@@ -90,7 +100,9 @@ async def risolvi_captcha(page, email):
             img_pil = Image.open(io.BytesIO(img_data))
             phash = imagehash.phash(img_pil)
             phash_str = str(phash)
+            log(email, f"   🔑 PHASH: {phash_str}")
             
+            # Cerca nel database
             for stored_phash, cid in phash_db.items():
                 try:
                     diff = imagehash.hex_to_hash(phash_str) - imagehash.hex_to_hash(stored_phash)
