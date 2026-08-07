@@ -18,9 +18,6 @@ RUN playwright install chromium
 
 WORKDIR /app
 COPY bot_worker.py .
-COPY proxy_manager.py .
 COPY accounts.json .
-COPY proxy_pool.json .
-COPY hash_phash_db.json .
 
 CMD ["python", "-u", "bot_worker.py"]
