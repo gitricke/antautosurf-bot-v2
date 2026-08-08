@@ -5,9 +5,6 @@ RUN apt-get update && apt-get install -y \
     libgomp1 libnspr4 libnss3 libx11-6 libxcomposite1 \
     libxcursor1 libxdamage1 libxi6 libxtst6 libxss1 \
     libxrandr2 libasound2 libatk1.0-0 libgtk-3-0 \
-    libgdk-pixbuf-2.0-0 libjpeg62-turbo libicu72 \
-    libwebp7 libvpx7 libenchant-2-2 libgbm1 \
-    libxkbcommon0 libpango-1.0-0 libcairo2 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt .
