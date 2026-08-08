@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# bot_worker.py - BOT MULTI-ACCOUNT IBRIDO (PUBBLICI + PROXYSCRAPE)
+# bot_worker.py - BOT MULTI-ACCOUNT IBRIDO INTELLIGENTE
 
 import os
 import time
@@ -62,22 +62,19 @@ def parse_proxy(proxy_str):
 PROXY_POOL_USATI = {}  # { "ip:port": timestamp_uso }
 
 def proxy_e_bloccato(proxy):
-    """Verifica se un proxy è già stato usato nelle ultime 24 ore"""
     key = f"{proxy['host']}:{proxy['port']}"
     if key in PROXY_POOL_USATI:
         tempo_trascorso = time.time() - PROXY_POOL_USATI[key]
-        if tempo_trascorso < 86400:  # 24 ore
+        if tempo_trascorso < 86400:
             return True
         else:
             del PROXY_POOL_USATI[key]
     return False
 
 def segna_proxy_usato(proxy):
-    """Segna un proxy come usato (bloccato per 24 ore)"""
     if isinstance(proxy, dict):
         key = f"{proxy['host']}:{proxy['port']}"
     else:
-        # Se è una stringa, estrai host:port
         try:
             parts = proxy.split('@')
             if len(parts) > 1:
@@ -155,7 +152,6 @@ def verifica_proxy(proxy, timeout=5):
     return proxy, False
 
 def trova_proxy_pubblico_libero():
-    """Trova un proxy pubblico NON bloccato"""
     proxy_list = ottieni_proxy_pubblici()
     if not proxy_list:
         return None
@@ -170,47 +166,55 @@ def trova_proxy_pubblico_libero():
     return None
 
 # ============================================================
-# OTTIENI PROXY IBRIDO (PUBBLICI + PROXYSCRAPE)
+# PROXY IBRIDO CON CONTATORE FALLIMENTI
 # ============================================================
+
+FALLIMENTI_PROXY = {}  # { "account": count }
 
 def ottieni_proxy_ibrido(email, proxy_pool, used_proxies):
     """
-    Sistema ibrido:
-    1. Prima cerca proxy PUBBLICI (gratis)
-    2. Se non funzionano, usa proxy PROXYSCRAPE (dal pool)
+    Sistema ibrido con soglia di fallimenti:
+    1. Prima prova proxy PUBBLICI (gratis) per 3 tentativi
+    2. Se falliscono tutti → usa proxy PROXYSCRAPE
     """
     
-    # 1. CERCA PROXY PUBBLICI
-    print(f"[{email[:10]}...] 🔍 Cerco proxy pubblico...")
-    proxy_pubblico = trova_proxy_pubblico_libero()
+    fallimenti = FALLIMENTI_PROXY.get(email, 0)
     
-    if proxy_pubblico:
-        print(f"[{email[:10]}...] ✅ Proxy pubblico trovato: {proxy_pubblico['host']}:{proxy_pubblico['port']}")
-        return {
-            "type": "public",
-            "proxy": proxy_pubblico,
-            "config": {
-                "server": f"http://{proxy_pubblico['host']}:{proxy_pubblico['port']}"
-            },
-            "string": f"{proxy_pubblico['host']}:{proxy_pubblico['port']}"
-        }
+    # 1. SE FALLIMENTI < 3 → CERCA PROXY PUBBLICI
+    if fallimenti < 3:
+        print(f"[{email[:10]}...] 🔍 Cerco proxy pubblico (tentativo {fallimenti+1}/3)...")
+        proxy_pubblico = trova_proxy_pubblico_libero()
+        
+        if proxy_pubblico:
+            print(f"[{email[:10]}...] ✅ Proxy pubblico: {proxy_pubblico['host']}:{proxy_pubblico['port']}")
+            return {
+                "type": "public",
+                "proxy": proxy_pubblico,
+                "config": {"server": f"http://{proxy_pubblico['host']}:{proxy_pubblico['port']}"},
+                "string": f"{proxy_pubblico['host']}:{proxy_pubblico['port']}"
+            }
+        else:
+            FALLIMENTI_PROXY[email] = fallimenti + 1
+            print(f"[{email[:10]}...] ⚠️ Proxy pubblico fallito ({fallimenti+1}/3)")
+            return None
     
-    # 2. CERCA PROXY PROXYSCRAPE (se quelli pubblici non funzionano)
-    print(f"[{email[:10]}...] ⚠️ Proxy pubblici non disponibili, cerco ProxyScrape...")
+    # 2. SE FALLIMENTI >= 3 → USA PROXY PROXYSCRAPE
+    print(f"[{email[:10]}...] ⚠️ 3 tentativi pubblici falliti, passo a ProxyScrape...")
     
-    for proxy in proxy_pool:
-        if proxy["account"] == email and proxy["proxy"] not in used_proxies:
-            proxy_config = parse_proxy(proxy["proxy"])
-            if proxy_config:
-                print(f"[{email[:10]}...] ✅ Proxy ProxyScrape trovato: {proxy['proxy'].split('@')[1]}")
-                # Segna come usato
-                segna_proxy_usato(proxy['proxy'])
-                return {
-                    "type": "proxyscrape",
-                    "proxy": proxy["proxy"],
-                    "config": proxy_config,
-                    "string": proxy["proxy"]
-                }
+    if proxy_pool:
+        for proxy in proxy_pool:
+            if proxy["account"] == email and proxy["proxy"] not in used_proxies:
+                proxy_config = parse_proxy(proxy["proxy"])
+                if proxy_config:
+                    print(f"[{email[:10]}...] ✅ Proxy ProxyScrape: {proxy['proxy'].split('@')[1]}")
+                    segna_proxy_usato(proxy['proxy'])
+                    FALLIMENTI_PROXY[email] = 0
+                    return {
+                        "type": "proxyscrape",
+                        "proxy": proxy["proxy"],
+                        "config": proxy_config,
+                        "string": proxy["proxy"]
+                    }
     
     print(f"[{email[:10]}...] ❌ Nessun proxy disponibile!")
     return None
@@ -297,7 +301,7 @@ def esegui_account(account_data, proxy_pool):
     
     used_proxies = []
     
-    # 🔥 OTTIENI PROXY IBRIDO (PUBBLICO + PROXYSCRAPE)
+    # 🔥 OTTIENI PROXY IBRIDO (con contatore fallimenti)
     proxy_data = ottieni_proxy_ibrido(email, proxy_pool, used_proxies)
     
     if not proxy_data:
@@ -506,7 +510,7 @@ def esegui_account(account_data, proxy_pool):
 
 def main():
     print("="*60)
-    print("🚀 BOT MULTI-ACCOUNT IBRIDO (PUBBLICI + PROXYSCRAPE)")
+    print("🚀 BOT MULTI-ACCOUNT IBRIDO INTELLIGENTE")
     print("="*60)
     
     accounts = carica_accounts()
@@ -523,8 +527,8 @@ def main():
     print(f"📋 Proxy ProxyScrape: {len(proxy_pool)}")
     print(f"🔇 Headless: {HEADLESS}")
     print("="*60)
-    print("🔄 1. Cerca proxy PUBBLICI (gratis)")
-    print("🔄 2. Se non funzionano → usa proxy PROXYSCRAPE")
+    print("🔄 1. Prova proxy PUBBLICI (3 tentativi)")
+    print("🔄 2. Se falliscono → usa proxy PROXYSCRAPE")
     print("="*60)
     
     while True:
