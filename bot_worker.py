@@ -65,7 +65,7 @@ def proxy_e_bloccato(proxy):
     key = f"{proxy['host']}:{proxy['port']}"
     if key in PROXY_POOL_USATI:
         tempo_trascorso = time.time() - PROXY_POOL_USATI[key]
-        if tempo_trascorso < 86400:  # 24 ore
+        if tempo_trascorso < 86400:
             return True
         else:
             del PROXY_POOL_USATI[key]
@@ -166,7 +166,7 @@ def trova_proxy_pubblico_libero():
     return None
 
 # ============================================================
-# PROXY IBRIDO CON CONTATORE FALLIMENTI
+# PROXY IBRIDO CON CONTATORE FALLIMENTI (PERSISTENTE)
 # ============================================================
 
 FALLIMENTI_PROXY = {}  # { "account": count }
@@ -180,45 +180,45 @@ def ottieni_proxy_ibrido(email, proxy_pool, used_proxies):
     
     fallimenti = FALLIMENTI_PROXY.get(email, 0)
     
-    # 1. SE FALLIMENTI < 1 → CERCA 1 PROXY PUBBLICO
-    if fallimenti < 1:
-        print(f"[{email[:10]}...] 🔍 Cerco proxy pubblico (tentativo {fallimenti+1}/1)...")
-        proxy_pubblico = trova_proxy_pubblico_libero()
+    # 🔥 SE HA GIà FALLITO 1 VOLTA, USA DIRETTAMENTE PROXYSCRAPE
+    if fallimenti >= 1:
+        print(f"[{email[:10]}...] ⚠️ Già fallito 1 volta, passo a ProxyScrape...")
         
-        if proxy_pubblico:
-            print(f"[{email[:10]}...] ✅ Proxy pubblico: {proxy_pubblico['host']}:{proxy_pubblico['port']}")
-            return {
-                "type": "public",
-                "proxy": proxy_pubblico,
-                "config": {"server": f"http://{proxy_pubblico['host']}:{proxy_pubblico['port']}"},
-                "string": f"{proxy_pubblico['host']}:{proxy_pubblico['port']}"
-            }
-        else:
-            FALLIMENTI_PROXY[email] = fallimenti + 1
-            print(f"[{email[:10]}...] ⚠️ Proxy pubblico fallito ({fallimenti+1}/1)")
-            return None
+        if proxy_pool:
+            for proxy in proxy_pool:
+                if proxy["account"] == email and proxy["proxy"] not in used_proxies:
+                    proxy_config = parse_proxy(proxy["proxy"])
+                    if proxy_config:
+                        print(f"[{email[:10]}...] ✅ Proxy ProxyScrape: {proxy['proxy'].split('@')[1]}")
+                        segna_proxy_usato(proxy['proxy'])
+                        used_proxies.append(proxy['proxy'])
+                        FALLIMENTI_PROXY[email] = 0  # Resetta dopo uso
+                        return {
+                            "type": "proxyscrape",
+                            "proxy": proxy["proxy"],
+                            "config": proxy_config,
+                            "string": proxy["proxy"]
+                        }
+        
+        print(f"[{email[:10]}...] ❌ Nessun proxy ProxyScrape disponibile!")
+        return None
     
-    # 2. SE FALLIMENTI >= 1 → USA PROXY PROXYSCRAPE
-    print(f"[{email[:10]}...] ⚠️ Proxy pubblico fallito, passo a ProxyScrape...")
+    # 1. SE FALLIMENTI < 1 → CERCA 1 PROXY PUBBLICO
+    print(f"[{email[:10]}...] 🔍 Cerco proxy pubblico (tentativo 1/1)...")
+    proxy_pubblico = trova_proxy_pubblico_libero()
     
-    if proxy_pool:
-        for proxy in proxy_pool:
-            if proxy["account"] == email and proxy["proxy"] not in used_proxies:
-                proxy_config = parse_proxy(proxy["proxy"])
-                if proxy_config:
-                    print(f"[{email[:10]}...] ✅ Proxy ProxyScrape: {proxy['proxy'].split('@')[1]}")
-                    segna_proxy_usato(proxy['proxy'])
-                    used_proxies.append(proxy['proxy'])
-                    FALLIMENTI_PROXY[email] = 0
-                    return {
-                        "type": "proxyscrape",
-                        "proxy": proxy["proxy"],
-                        "config": proxy_config,
-                        "string": proxy["proxy"]
-                    }
-    
-    print(f"[{email[:10]}...] ❌ Nessun proxy disponibile!")
-    return None
+    if proxy_pubblico:
+        print(f"[{email[:10]}...] ✅ Proxy pubblico: {proxy_pubblico['host']}:{proxy_pubblico['port']}")
+        return {
+            "type": "public",
+            "proxy": proxy_pubblico,
+            "config": {"server": f"http://{proxy_pubblico['host']}:{proxy_pubblico['port']}"},
+            "string": f"{proxy_pubblico['host']}:{proxy_pubblico['port']}"
+        }
+    else:
+        FALLIMENTI_PROXY[email] = 1
+        print(f"[{email[:10]}...] ⚠️ Nessun proxy pubblico disponibile, passo a ProxyScrape...")
+        return None
 
 # ============================================================
 # LOGGING
@@ -291,7 +291,7 @@ def risolvi_captcha(page, email, phash_db):
     return False
 
 # ============================================================
-# GESTISCI UN SINGOLO ACCOUNT (CON TRACCIAMENTO SUCCESSO)
+# GESTISCI UN SINGOLO ACCOUNT
 # ============================================================
 
 def esegui_account(account_data, proxy_pool):
@@ -302,11 +302,13 @@ def esegui_account(account_data, proxy_pool):
     
     used_proxies = []
     
-    # OTTIENI PROXY IBRIDO
+    # 🔥 OTTIENI PROXY IBRIDO
     proxy_data = ottieni_proxy_ibrido(email, proxy_pool, used_proxies)
     
     if not proxy_data:
         log(email, "❌ Nessun proxy disponibile!")
+        # Incrementa il contatore per evitare loop
+        FALLIMENTI_PROXY[email] = FALLIMENTI_PROXY.get(email, 0) + 1
         return
     
     proxy_config = proxy_data["config"]
@@ -317,7 +319,7 @@ def esegui_account(account_data, proxy_pool):
     
     phash_db = carica_database()
     
-    # 🔥 TRACCIA SE IL SURF HA AVUTO SUCCESSO
+    # Traccia se il surf ha avuto successo
     surf_successo = False
     
     with sync_playwright() as p:
@@ -375,6 +377,9 @@ def esegui_account(account_data, proxy_pool):
                 log(email, "⚠️ CAPTCHA RILEVATO!")
                 if not risolvi_captcha(page, email, phash_db):
                     log(email, "❌ Captcha non risolto!")
+                    # Se captcha non risolto, segna come fallito
+                    if proxy_type == "public":
+                        FALLIMENTI_PROXY[email] = FALLIMENTI_PROXY.get(email, 0) + 1
                     return
             
             balance_match = re.search(r'btoday["\']?\s*[=:]\s*([\d.]+)', html)
@@ -384,6 +389,8 @@ def esegui_account(account_data, proxy_pool):
             csrf_match = re.search(r'csrf_token=([a-f0-9]+)', html)
             if not csrf_match:
                 log(email, "❌ CSRF non trovato!")
+                if proxy_type == "public":
+                    FALLIMENTI_PROXY[email] = FALLIMENTI_PROXY.get(email, 0) + 1
                 return
             
             csrf = csrf_match.group(1)
@@ -436,6 +443,8 @@ def esegui_account(account_data, proxy_pool):
                     
                     if csrf_invalidi >= MAX_CSRF_INVALIDI:
                         log(email, "🔄 Troppi CSRF invalidi!")
+                        if proxy_type == "public":
+                            FALLIMENTI_PROXY[email] = FALLIMENTI_PROXY.get(email, 0) + 1
                         return
                     
                     page.goto(f"https://antautosurf.com/index.php?bitcoinwallet={email}&ref=", wait_until="networkidle", timeout=30000)
@@ -472,7 +481,6 @@ def esegui_account(account_data, proxy_pool):
                     print("   " * 20, end="\r")
                     continue
                 
-                # 🔥 ANNUNCIO REALE TROVATO!
                 log(email, f"   📢 Annuncio reale! Timer: {time_val}s")
                 surf_successo = True
                 
@@ -505,21 +513,16 @@ def esegui_account(account_data, proxy_pool):
             
             log(email, f"✅ Completati {MAX_CYCLES} cicli, passo al prossimo account")
             
+            # Se ha funzionato con proxy pubblico, resetta il contatore
+            if proxy_type == "public" and surf_successo:
+                FALLIMENTI_PROXY[email] = 0
+            
         except Exception as e:
             log(email, f"❌ Errore: {e}")
+            if proxy_type == "public":
+                FALLIMENTI_PROXY[email] = FALLIMENTI_PROXY.get(email, 0) + 1
         finally:
             browser.close()
-            
-            # 🔥 SE IL PROXY ERA PUBBLICO E HA FALLITO, INCREMENTA IL CONTATORE
-            if proxy_type == "public" and not surf_successo:
-                FALLIMENTI_PROXY[email] = FALLIMENTI_PROXY.get(email, 0) + 1
-                log(email, f"⚠️ Proxy pubblico fallito ({FALLIMENTI_PROXY[email]}/1)")
-            elif proxy_type == "public" and surf_successo:
-                # Se ha funzionato, resetta il contatore
-                FALLIMENTI_PROXY[email] = 0
-                log(email, f"✅ Proxy pubblico funzionante! Contatore resettato")
-            elif proxy_type == "proxyscrape" and surf_successo:
-                log(email, f"✅ Proxy ProxyScrape funzionante!")
 
 # ============================================================
 # MAIN
@@ -545,7 +548,7 @@ def main():
     print(f"🔇 Headless: {HEADLESS}")
     print("="*60)
     print("🔄 1. Prova 1 proxy PUBBLICO")
-    print("🔄 2. Se fallisce → usa proxy PROXYSCRAPE")
+    print("🔄 2. Se fallisce → usa proxy PROXYSCRAPE (permanentemente)")
     print("="*60)
     
     while True:
