@@ -1,32 +1,8 @@
 [
-    {
-        "email": "serenamilani74@gmail.com",
-        "password": "4591##Pane",
-        "proxy": "ta2pqpengxfg:mor06g37xrvjd6w@65.111.31.110:3129"
-    },
-    {
-        "email": "vincenzogrulli@yahoo.com",
-        "password": "dave45!!MU",
-        "proxy": "ta2pqpengxfg:mor06g37xrvjd6w@65.111.9.214:3129"
-    },
-    {
-        "email": "marziadelbello@tiscali.it",
-        "password": "PA45$!!#na",
-        "proxy": "ta2pqpengxfg:mor06g37xrvjd6w@104.207.56.168:3129"
-    },
-    {
-        "email": "paolovecchi_62@gmail.com",
-        "password": "UT56$!dama",
-        "proxy": "ta2pqpengxfg:mor06g37xrvjd6w@104.207.61.157:3129"
-    },
-    {
-        "email": "veronicasibrni@libero.it",
-        "password": "HJGF52!!dama",
-        "proxy": "ta2pqpengxfg:mor06g37xrvjd6w@209.50.172.228:3129"
-    },
-    {
-        "email": "nanniserena@virgilio.it",
-        "password": "PETR$!45vu",
-        "proxy": "ta2pqpengxfg:mor06g37xrvjd6w@104.207.42.179:3129"
-    }
+    {"email": "serenamilani74@gmail.com", "password": "4591##Pane"},
+    {"email": "vincenzogrulli@yahoo.com", "password": "dave45!!MU"},
+    {"email": "marziadelbello@tiscali.it", "password": "PA45$!!#na"},
+    {"email": "paolovecchi_62@gmail.com", "password": "UT56$!dama"},
+    {"email": "veronicasibrni@libero.it", "password": "HJGF52!!dama"},
+    {"email": "nanniserena@virgilio.it", "password": "PETR$!45vu"}
 ]
