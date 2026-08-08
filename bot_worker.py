@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# bot_worker.py - CON SUPABASE (proxy cancellati dopo l'uso)
+# bot_worker.py - CON SUPABASE (proxy NON cancellati se falliscono)
 
 import asyncio
 import json
@@ -18,7 +18,7 @@ import imagehash
 # ============================================================
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "https://osetncxfnkgzlfxmltrl.supabase.co")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "sb_publishable_mfzs2CXphKhSmAbAzXax0Q_p3F3wqfp")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9zZXRuY3hmbmtnemxmeG1sdHJsIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4NjEwNjc4MCwiZXhwIjoyMTAxNjgyNzgwfQ.Omc1pr1pPHq1M8Ph2HzLy1KAGRMzY4JYB5GbGulIYUM")
 WORKER_ID = os.getenv("WORKER_ID", "worker_1")
 
 supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
@@ -44,37 +44,6 @@ def carica_accounts():
         return []
 
 # ============================================================
-# FUNZIONI DATABASE
-# ============================================================
-
-def get_proxy_table():
-    return f"proxy_pool_{WORKER_ID}"
-
-async def prendi_proxy():
-    """Prende un proxy dal database e lo cancella"""
-    table = get_proxy_table()
-    
-    try:
-        response = supabase.table(table).select("id, proxy").limit(1).execute()
-        
-        if not response.data:
-            print(f"❌ Nessun proxy disponibile per {WORKER_ID}")
-            return None
-        
-        proxy_data = response.data[0]
-        proxy_id = proxy_data["id"]
-        proxy = proxy_data["proxy"]
-        
-        supabase.table(table).delete().eq("id", proxy_id).execute()
-        print(f"🗑️ Proxy {proxy_id} cancellato dal database")
-        
-        return proxy
-        
-    except Exception as e:
-        print(f"❌ Errore prendi_proxy: {e}")
-        return None
-
-# ============================================================
 # FUNZIONI DI UTILITÀ
 # ============================================================
 
@@ -90,10 +59,107 @@ def parse_proxy(proxy_str):
         return None
 
 # ============================================================
-# CAPTCHA CON SUPABASE
+# FUNZIONI DATABASE - GESTIONE PROXY
 # ============================================================
 
+def get_proxy_table():
+    return f"proxy_pool_{WORKER_ID}"
+
+async def prendi_proxy():
+    """
+    Prende un proxy dal database (NON LO CANCELLA, lo segna come "in_uso")
+    Restituisce: (proxy_string, proxy_id) o (None, None)
+    """
+    table = get_proxy_table()
+    
+    try:
+        # Prendi il primo proxy disponibile
+        response = supabase.table(table).select("id, proxy").eq("status", "available").limit(1).execute()
+        
+        if not response.data:
+            print(f"❌ Nessun proxy disponibile per {WORKER_ID}")
+            return None, None
+        
+        proxy_data = response.data[0]
+        proxy_id = proxy_data["id"]
+        proxy = proxy_data["proxy"]
+        
+        # 🔥 NON CANCELLARE! Segna solo come "in_uso"
+        supabase.table(table).update({
+            "status": "in_uso",
+            "assigned_to": WORKER_ID,
+            "assigned_at": datetime.now().isoformat()
+        }).eq("id", proxy_id).execute()
+        
+        print(f"📤 Proxy {proxy_id} preso (in uso)")
+        return proxy, proxy_id
+        
+    except Exception as e:
+        print(f"❌ Errore prendi_proxy: {e}")
+        return None, None
+
+async def cancella_proxy(proxy_id):
+    """Cancella un proxy dal database (SOLO dopo surf riuscito)"""
+    table = get_proxy_table()
+    
+    try:
+        supabase.table(table).delete().eq("id", proxy_id).execute()
+        print(f"🗑️ Proxy {proxy_id} CANCELLATO (surf riuscito)")
+        return True
+    except Exception as e:
+        print(f"❌ Errore cancellazione proxy: {e}")
+        return False
+
+async def rilascia_proxy(proxy_id):
+    """Rilascia un proxy (torna disponibile se fallisce)"""
+    table = get_proxy_table()
+    
+    try:
+        supabase.table(table).update({
+            "status": "available",
+            "assigned_to": None,
+            "assigned_at": None
+        }).eq("id", proxy_id).execute()
+        print(f"🔄 Proxy {proxy_id} RILASCIATO (torna disponibile)")
+        return True
+    except Exception as e:
+        print(f"❌ Errore rilascio proxy: {e}")
+        return False
+
+async def ottieni_statistiche():
+    """Ottiene statistiche sui proxy disponibili"""
+    table = get_proxy_table()
+    
+    try:
+        total = supabase.table(table).select("id").execute()
+        available = supabase.table(table).select("id").eq("status", "available").execute()
+        in_uso = supabase.table(table).select("id").eq("status", "in_uso").execute()
+        
+        print(f"📊 Proxy: {len(available.data)} disponibili, {len(in_uso.data)} in uso, {len(total.data)} totali")
+        return {
+            "totale": len(total.data),
+            "disponibili": len(available.data),
+            "in_uso": len(in_uso.data)
+        }
+    except:
+        return {"totale": 0, "disponibili": 0, "in_uso": 0}
+
+# ============================================================
+# SISTEMA CAPTCHA CON SUPABASE
+# ============================================================
+
+def carica_database_locale():
+    try:
+        with open("hash_phash_db.json", "r") as f:
+            return json.load(f)
+    except:
+        return {}
+
+phash_db = carica_database_locale()
+print(f"📊 Database phash locale: {len(phash_db)} hash")
+
 async def risolvi_captcha(page, email):
+    """Sistema avanzato di risoluzione captcha con Supabase"""
     html = await page.content()
     
     if "Please Click Similar" not in html:
@@ -101,22 +167,26 @@ async def risolvi_captcha(page, email):
     
     log(email, "⚠️ CAPTCHA RILEVATO!")
     
+    # 1. Estrai tutti i CID disponibili
     cids = [int(x) for x in re.findall(r'cid=(\d+)', html)]
     cids_unici = list(set(cids))
     log(email, f"   📌 CID disponibili: {cids_unici}")
     
+    # 2. Prova ogni CID
     for cid in cids_unici:
         await page.goto(f"https://antautosurf.com/index.php?cid={cid}")
         await asyncio.sleep(2)
         html_test = await page.content()
         if "Please Click Similar" not in html_test:
             log(email, f"   ✅ CAPTCHA RISOLTO! CID: {cid}")
+            # Salva su Supabase
             try:
                 supabase.table("captcha_cache").insert({"phash": str(cid), "cid": cid}).execute()
             except:
                 pass
             return True
     
+    # 3. Se nessun CID funziona, prova con PHASH
     try:
         img_element = await page.query_selector('img[src*="capimg.php"]')
         if img_element:
@@ -126,6 +196,7 @@ async def risolvi_captcha(page, email):
             phash_str = str(phash)
             log(email, f"   🔑 PHASH: {phash_str}")
             
+            # Cerca su Supabase
             try:
                 response = supabase.table("captcha_cache")\
                     .select("cid")\
@@ -148,7 +219,7 @@ async def risolvi_captcha(page, email):
     return False
 
 # ============================================================
-# LOGIN E SURF
+# LOGIN CON RETRY
 # ============================================================
 
 async def login_con_retry(page, email, password):
@@ -195,7 +266,13 @@ async def login_con_retry(page, email, password):
     log(email, "❌ Login fallito dopo 3 tentativi")
     return False
 
+# ============================================================
+# SURF CYCLE
+# ============================================================
+
 async def surf_cycle(page, email):
+    """Esegue un singolo ciclo di surf per un account"""
+    
     log(email, f"🔄 CICLO")
     
     await page.goto(f"https://antautosurf.com/surf.php?wallet={email}")
@@ -226,16 +303,22 @@ async def surf_cycle(page, email):
     return True
 
 # ============================================================
-# GESTISCI ACCOUNT
+# GESTISCI ACCOUNT - CON GESTIONE PROXY INTELLIGENTE
 # ============================================================
 
 async def gestisci_account(account_data):
+    """
+    Gestisce un singolo account per UN CICLO di surf.
+    Proxy: se fallisce → torna disponibile, se successo → cancellato
+    """
+    
     email = account_data["email"]
     password = account_data["password"]
     
     log(email, "🚀 Avvio account...")
     
-    proxy_str = await prendi_proxy()
+    # 🔥 1. PRENDI PROXY (NON CANCELLATO!)
+    proxy_str, proxy_id = await prendi_proxy()
     if not proxy_str:
         log(email, "❌ Nessun proxy disponibile!")
         return
@@ -243,9 +326,12 @@ async def gestisci_account(account_data):
     proxy_config = parse_proxy(proxy_str)
     if not proxy_config:
         log(email, "❌ Proxy non valido!")
+        await rilascia_proxy(proxy_id)  # Rilascia (torna disponibile)
         return
     
     log(email, f"🌐 Proxy: {proxy_str.split('@')[1] if '@' in proxy_str else proxy_str}")
+    
+    successo = False  # 🔥 Traccia se il ciclo è riuscito
     
     async with async_playwright() as p:
         browser = await p.chromium.launch(
@@ -258,30 +344,44 @@ async def gestisci_account(account_data):
         page = await context.new_page()
         
         try:
+            # LOGIN
             if not await login_con_retry(page, email, password):
+                await rilascia_proxy(proxy_id)
                 return
             
+            # DASHBOARD
             await page.goto(f"https://antautosurf.com/index.php?bitcoinwallet={email}&ref=")
             await asyncio.sleep(0)
             
+            # CAPTCHA
             await risolvi_captcha(page, email)
             
+            # BALANCE
             html = await page.content()
             balance_match = re.search(r'btoday["\']?\s*[=:]\s*([\d.]+)', html)
             if balance_match:
                 log(email, f"💰 Balance: {balance_match.group(1)}")
             
+            # 🔥 SURF - SE ARRIVA QUI, HA FUNZIONATO
             await surf_cycle(page, email)
             
             log(email, "✅ Ciclo completato, passo al prossimo account")
+            successo = True  # 🔥 MARK SUCCESSO!
                     
         except Exception as e:
             log(email, f"❌ Errore: {e}")
+            await rilascia_proxy(proxy_id)  # Rilascia (torna disponibile)
         finally:
             await browser.close()
+            
+            # 🔥 SOLO SE HA AVUTO SUCCESSO, CANCELLA IL PROXY!
+            if successo:
+                await cancella_proxy(proxy_id)
+            else:
+                await rilascia_proxy(proxy_id)  # Già rilasciato, ma per sicurezza
 
 # ============================================================
-# MAIN
+# MAIN - LOOP INFINITO CON ROTAZIONE ACCOUNT
 # ============================================================
 
 async def main():
@@ -299,11 +399,20 @@ async def main():
     print(f"📦 Worker: {WORKER_ID}")
     print("="*60)
     
+    # Mostra statistiche iniziali
+    await ottieni_statistiche()
+    print("="*60)
+    
+    # 🔥 LOOP INFINITO - ROTAZIONE ACCOUNT
     while True:
         for account in accounts:
             await gestisci_account(account)
             await asyncio.sleep(2)
             print("─" * 60)
+            
+            # Ogni 5 cicli, mostra statistiche
+            if accounts.index(account) == 0:
+                await ottieni_statistiche()
 
 if __name__ == "__main__":
     try:
