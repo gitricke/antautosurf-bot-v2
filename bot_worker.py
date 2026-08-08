@@ -65,7 +65,7 @@ def proxy_e_bloccato(proxy):
     key = f"{proxy['host']}:{proxy['port']}"
     if key in PROXY_POOL_USATI:
         tempo_trascorso = time.time() - PROXY_POOL_USATI[key]
-        if tempo_trascorso < 86400:
+        if tempo_trascorso < 86400:  # 24 ore
             return True
         else:
             del PROXY_POOL_USATI[key]
@@ -166,7 +166,7 @@ def trova_proxy_pubblico_libero():
     return None
 
 # ============================================================
-# PROXY IBRIDO CON CONTATORE FALLIMENTI
+# PROXY IBRIDO CON CONTATORE FALLIMENTI (CORRETTO)
 # ============================================================
 
 FALLIMENTI_PROXY = {}  # { "account": count }
@@ -174,15 +174,15 @@ FALLIMENTI_PROXY = {}  # { "account": count }
 def ottieni_proxy_ibrido(email, proxy_pool, used_proxies):
     """
     Sistema ibrido con soglia di fallimenti:
-    1. Prima prova proxy PUBBLICI (gratis) per 3 tentativi
-    2. Se falliscono tutti → usa proxy PROXYSCRAPE
+    1. Prima prova 1 proxy PUBBLICO
+    2. Se fallisce → usa proxy PROXYSCRAPE
     """
     
     fallimenti = FALLIMENTI_PROXY.get(email, 0)
     
-    # 1. SE FALLIMENTI < 3 → CERCA PROXY PUBBLICI
-    if fallimenti < 3:
-        print(f"[{email[:10]}...] 🔍 Cerco proxy pubblico (tentativo {fallimenti+1}/3)...")
+    # 1. SE FALLIMENTI < 1 → CERCA 1 PROXY PUBBLICO
+    if fallimenti < 1:
+        print(f"[{email[:10]}...] 🔍 Cerco proxy pubblico (tentativo {fallimenti+1}/1)...")
         proxy_pubblico = trova_proxy_pubblico_libero()
         
         if proxy_pubblico:
@@ -195,11 +195,11 @@ def ottieni_proxy_ibrido(email, proxy_pool, used_proxies):
             }
         else:
             FALLIMENTI_PROXY[email] = fallimenti + 1
-            print(f"[{email[:10]}...] ⚠️ Proxy pubblico fallito ({fallimenti+1}/3)")
+            print(f"[{email[:10]}...] ⚠️ Proxy pubblico fallito ({fallimenti+1}/1)")
             return None
     
     # 2. SE FALLIMENTI >= 1 → USA PROXY PROXYSCRAPE
-    print(f"[{email[:10]}...] ⚠️ 3 tentativi pubblici falliti, passo a ProxyScrape...")
+    print(f"[{email[:10]}...] ⚠️ Proxy pubblico fallito, passo a ProxyScrape...")
     
     if proxy_pool:
         for proxy in proxy_pool:
@@ -208,6 +208,7 @@ def ottieni_proxy_ibrido(email, proxy_pool, used_proxies):
                 if proxy_config:
                     print(f"[{email[:10]}...] ✅ Proxy ProxyScrape: {proxy['proxy'].split('@')[1]}")
                     segna_proxy_usato(proxy['proxy'])
+                    used_proxies.append(proxy['proxy'])  # 🔥 AGGIUNGI A USED
                     FALLIMENTI_PROXY[email] = 0
                     return {
                         "type": "proxyscrape",
@@ -527,8 +528,8 @@ def main():
     print(f"📋 Proxy ProxyScrape: {len(proxy_pool)}")
     print(f"🔇 Headless: {HEADLESS}")
     print("="*60)
-    print("🔄 1. Prova proxy PUBBLICI (3 tentativi)")
-    print("🔄 2. Se falliscono → usa proxy PROXYSCRAPE")
+    print("🔄 1. Prova 1 proxy PUBBLICO")
+    print("🔄 2. Se fallisce → usa proxy PROXYSCRAPE")
     print("="*60)
     
     while True:
