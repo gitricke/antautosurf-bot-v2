@@ -1,35 +1,49 @@
 #!/usr/bin/env python3
-# bot_worker.py - CON SUPABASE (proxy NON cancellati se falliscono)
+# bot_worker.py - BOT MULTI-ACCOUNT V3 CON PROXY POOL CONDIVISO
+# 6 account in sequenza, proxy automatici da API pubbliche
 
-import asyncio
+import os
+import time
+import sys
 import json
 import re
-import sys
-import os
+import requests
+from playwright.sync_api import sync_playwright
 from datetime import datetime
-from playwright.async_api import async_playwright
-from supabase import create_client, Client
+import imagehash
 from PIL import Image
 import io
-import imagehash
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ============================================================
-# CONFIGURAZIONE SUPABASE
-# ============================================================
-
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://osetncxfnkgzlfxmltrl.supabase.co")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im9zZXRuY3hmbmtnemxmeG1sdHJsIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc4NjEwNjc4MCwiZXhwIjoyMTAxNjgyNzgwfQ.Omc1pr1pPHq1M8Ph2HzLy1KAGRMzY4JYB5GbGulIYUM")
-WORKER_ID = os.getenv("WORKER_ID", "worker_1")
-
-supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
-
-# ============================================================
-# CONFIGURAZIONE BOT
+# CONFIGURAZIONE
 # ============================================================
 
 HEADLESS = True
-MAX_RETRY = 3
 ACCOUNTS_FILE = "accounts.json"
+
+# ============================================================
+# PROXY POOL - TRACCIA PROXY USATI (BLOCCO 24 ORE)
+# ============================================================
+
+PROXY_POOL = {}  # { "ip:port": timestamp_uso }
+
+def proxy_e_bloccato(proxy):
+    """Verifica se un proxy è già stato usato nelle ultime 24 ore"""
+    key = f"{proxy['host']}:{proxy['port']}"
+    if key in PROXY_POOL:
+        tempo_trascorso = time.time() - PROXY_POOL[key]
+        if tempo_trascorso < 86400:  # 24 ore
+            return True
+        else:
+            del PROXY_POOL[key]
+    return False
+
+def segna_proxy_usato(proxy):
+    """Segna un proxy come usato (bloccato per 24 ore)"""
+    key = f"{proxy['host']}:{proxy['port']}"
+    PROXY_POOL[key] = time.time()
+    print(f"📌 Proxy {key} segnato come usato (bloccato 24h)")
 
 # ============================================================
 # CARICA ACCOUNT
@@ -44,349 +58,370 @@ def carica_accounts():
         return []
 
 # ============================================================
-# FUNZIONI DI UTILITÀ
+# LOGGING
 # ============================================================
 
 def log(email, msg):
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] [{email[:10]}...] {msg}", flush=True)
+    prefix = email[:10] if email else "SISTEMA"
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] [{prefix}...] {msg}", flush=True)
 
-def parse_proxy(proxy_str):
+# ============================================================
+# PROXY FINDER - DA API PUBBLICHE
+# ============================================================
+
+PROXY_SOURCES = [
+    "https://free-proxy-list.net/",
+    "https://api.proxyscrape.com/?request=displayproxies&proxytype=http",
+]
+
+def scarica_proxy_da_url(url):
     try:
-        auth, host = proxy_str.split('@')
-        user, password = auth.split(':')
-        return {"server": f"http://{host}", "username": user, "password": password}
+        response = requests.get(url, timeout=10)
+        if response.status_code == 200:
+            proxies = []
+            for line in response.text.splitlines():
+                line = line.strip()
+                if line and not line.startswith('#') and not line.startswith('<!'):
+                    if ':' in line:
+                        parts = line.split(':')
+                        if len(parts) == 2:
+                            try:
+                                port = int(parts[1])
+                                proxies.append({"host": parts[0], "port": port})
+                            except:
+                                pass
+            return proxies
     except:
-        return None
+        pass
+    return []
 
-# ============================================================
-# FUNZIONI DATABASE - GESTIONE PROXY
-# ============================================================
-
-def get_proxy_table():
-    return f"proxy_pool_{WORKER_ID}"
-
-async def prendi_proxy():
-    """
-    Prende un proxy dal database (NON LO CANCELLA, lo segna come "in_uso")
-    Restituisce: (proxy_string, proxy_id) o (None, None)
-    """
-    table = get_proxy_table()
+def ottieni_proxy_pubblici():
+    all_proxies = []
+    for url in PROXY_SOURCES:
+        proxies = scarica_proxy_da_url(url)
+        if proxies:
+            all_proxies.extend(proxies)
     
-    try:
-        # Prendi il primo proxy disponibile
-        response = supabase.table(table).select("id, proxy").eq("status", "available").limit(1).execute()
-        
-        if not response.data:
-            print(f"❌ Nessun proxy disponibile per {WORKER_ID}")
-            return None, None
-        
-        proxy_data = response.data[0]
-        proxy_id = proxy_data["id"]
-        proxy = proxy_data["proxy"]
-        
-        # 🔥 NON CANCELLARE! Segna solo come "in_uso"
-        supabase.table(table).update({
-            "status": "in_uso",
-            "assigned_to": WORKER_ID,
-            "assigned_at": datetime.now().isoformat()
-        }).eq("id", proxy_id).execute()
-        
-        print(f"📤 Proxy {proxy_id} preso (in uso)")
-        return proxy, proxy_id
-        
-    except Exception as e:
-        print(f"❌ Errore prendi_proxy: {e}")
-        return None, None
-
-async def cancella_proxy(proxy_id):
-    """Cancella un proxy dal database (SOLO dopo surf riuscito)"""
-    table = get_proxy_table()
+    unique = []
+    seen = set()
+    for p in all_proxies:
+        key = f"{p['host']}:{p['port']}"
+        if key not in seen:
+            seen.add(key)
+            unique.append(p)
     
-    try:
-        supabase.table(table).delete().eq("id", proxy_id).execute()
-        print(f"🗑️ Proxy {proxy_id} CANCELLATO (surf riuscito)")
-        return True
-    except Exception as e:
-        print(f"❌ Errore cancellazione proxy: {e}")
-        return False
+    return unique
 
-async def rilascia_proxy(proxy_id):
-    """Rilascia un proxy (torna disponibile se fallisce)"""
-    table = get_proxy_table()
-    
+def verifica_proxy(proxy, timeout=5):
     try:
-        supabase.table(table).update({
-            "status": "available",
-            "assigned_to": None,
-            "assigned_at": None
-        }).eq("id", proxy_id).execute()
-        print(f"🔄 Proxy {proxy_id} RILASCIATO (torna disponibile)")
-        return True
-    except Exception as e:
-        print(f"❌ Errore rilascio proxy: {e}")
-        return False
-
-async def ottieni_statistiche():
-    """Ottiene statistiche sui proxy disponibili"""
-    table = get_proxy_table()
-    
-    try:
-        total = supabase.table(table).select("id").execute()
-        available = supabase.table(table).select("id").eq("status", "available").execute()
-        in_uso = supabase.table(table).select("id").eq("status", "in_uso").execute()
+        host = proxy["host"]
+        port = proxy["port"]
         
-        print(f"📊 Proxy: {len(available.data)} disponibili, {len(in_uso.data)} in uso, {len(total.data)} totali")
-        return {
-            "totale": len(total.data),
-            "disponibili": len(available.data),
-            "in_uso": len(in_uso.data)
+        proxy_dict = {
+            "http": f"http://{host}:{port}",
+            "https": f"http://{host}:{port}"
         }
+        
+        response = requests.get("http://httpbin.org/ip", proxies=proxy_dict, timeout=timeout)
+        if response.status_code == 200:
+            return proxy, True
     except:
-        return {"totale": 0, "disponibili": 0, "in_uso": 0}
+        pass
+    return proxy, False
+
+def ottieni_proxy_libero():
+    """Ottiene un proxy che NON è stato usato nelle ultime 24 ore"""
+    
+    proxy_list = ottieni_proxy_pubblici()
+    if not proxy_list:
+        log("", "❌ Nessun proxy trovato!")
+        return None
+    
+    for proxy in proxy_list:
+        if not proxy_e_bloccato(proxy):
+            proxy_ok, ok = verifica_proxy(proxy)
+            if ok:
+                segna_proxy_usato(proxy_ok)
+                return proxy_ok
+    
+    log("", "⏳ Tutti i proxy sono bloccati, aspetto 60 secondi...")
+    time.sleep(60)
+    return None
 
 # ============================================================
-# SISTEMA CAPTCHA CON SUPABASE
+# CARICA DATABASE PHASH
 # ============================================================
 
-def carica_database_locale():
+def carica_database():
     try:
         with open("hash_phash_db.json", "r") as f:
             return json.load(f)
     except:
         return {}
 
-phash_db = carica_database_locale()
-print(f"📊 Database phash locale: {len(phash_db)} hash")
+# ============================================================
+# RISOLUZIONE CAPTCHA
+# ============================================================
 
-async def risolvi_captcha(page, email):
-    """Sistema avanzato di risoluzione captcha con Supabase"""
-    html = await page.content()
+def risolvi_captcha(page, email, phash_db):
+    html = page.content()
+    cap_match = re.search(r'capimg\.php\?id=(\d+)', html)
+    if not cap_match:
+        return False
     
-    if "Please Click Similar" not in html:
-        return True
-    
-    log(email, "⚠️ CAPTCHA RILEVATO!")
-    
-    # 1. Estrai tutti i CID disponibili
     cids = [int(x) for x in re.findall(r'cid=(\d+)', html)]
     cids_unici = list(set(cids))
+    
     log(email, f"   📌 CID disponibili: {cids_unici}")
     
-    # 2. Prova ogni CID
-    for cid in cids_unici:
-        await page.goto(f"https://antautosurf.com/index.php?cid={cid}")
-        await asyncio.sleep(2)
-        html_test = await page.content()
-        if "Please Click Similar" not in html_test:
-            log(email, f"   ✅ CAPTCHA RISOLTO! CID: {cid}")
-            # Salva su Supabase
-            try:
-                supabase.table("captcha_cache").insert({"phash": str(cid), "cid": cid}).execute()
-            except:
-                pass
-            return True
-    
-    # 3. Se nessun CID funziona, prova con PHASH
     try:
-        img_element = await page.query_selector('img[src*="capimg.php"]')
-        if img_element:
-            img_data = await img_element.screenshot()
-            img_pil = Image.open(io.BytesIO(img_data))
-            phash = imagehash.phash(img_pil)
-            phash_str = str(phash)
-            log(email, f"   🔑 PHASH: {phash_str}")
-            
-            # Cerca su Supabase
+        img_element = page.locator('img[src*="capimg.php"]')
+        img_data = img_element.screenshot()
+        
+        img_pil = Image.open(io.BytesIO(img_data))
+        phash = imagehash.phash(img_pil)
+        phash_str = str(phash)
+        log(email, f"   🔑 PHASH: {phash_str}")
+        
+        for stored_phash, cid in phash_db.items():
             try:
-                response = supabase.table("captcha_cache")\
-                    .select("cid")\
-                    .eq("phash", phash_str)\
-                    .limit(1)\
-                    .execute()
-                
-                if response.data:
-                    cid = response.data[0]["cid"]
-                    await page.goto(f"https://antautosurf.com/index.php?cid={cid}")
-                    await asyncio.sleep(2)
-                    log(email, f"   ✅ CAPTCHA RISOLTO! CID: {cid} (da database)")
+                diff = imagehash.hex_to_hash(phash_str) - imagehash.hex_to_hash(stored_phash)
+                if diff <= 10:
+                    page.goto(f"https://antautosurf.com/index.php?cid={cid}")
+                    time.sleep(2)
+                    log(email, f"   ✅ CAPTCHA RISOLTO! CID: {cid}")
                     return True
             except:
                 pass
     except:
         pass
     
+    for cid in cids_unici:
+        page.goto(f"https://antautosurf.com/index.php?cid={cid}")
+        time.sleep(2)
+        html_test = page.content()
+        if "Please Click Similar" not in html_test:
+            phash_db[phash_str] = cid
+            with open("hash_phash_db.json", "w") as f:
+                json.dump(phash_db, f, indent=2)
+            log(email, f"   ✅ CAPTCHA RISOLTO! CID: {cid} (nuovo)")
+            return True
+    
     log(email, f"   ❌ CAPTCHA NON RISOLTO!")
     return False
 
 # ============================================================
-# LOGIN CON RETRY
+# GESTISCI UN SINGOLO ACCOUNT
 # ============================================================
 
-async def login_con_retry(page, email, password):
-    for tentativo in range(MAX_RETRY):
-        log(email, f"📧 Tentativo login {tentativo+1}/{MAX_RETRY}")
-        
-        try:
-            await page.goto("https://antautosurf.com/", wait_until="domcontentloaded", timeout=30000)
-            await asyncio.sleep(2)
-            
-            await page.fill('input[name="bitcoinwallet"]', email)
-            await page.click('input[type="submit"][value*="Enter"]')
-            await asyncio.sleep(3)
-            
-            html = await page.content()
-            
-            if "Set Login Password" in html:
-                log(email, "📝 Nuovo account! Registro...")
-                await page.fill('input[name="password"]', password)
-                await page.fill('input[name="passwordb"]', password)
-                match = re.search(r'name="confirm2" value="(\d+)"', html)
-                if match:
-                    confirm2 = match.group(1)
-                    await page.goto(f"https://antautosurf.com/index.php?password={password}&passwordb={password}&confirm2={confirm2}")
-                    await asyncio.sleep(3)
-                    log(email, "   ✅ Password impostata!")
-                    continue
-            
-            html = await page.content()
-            if "Please enter Password" in html:
-                await page.fill('input[name="password"]', password)
-                await page.click('input[value="Enter"]')
-                await asyncio.sleep(3)
-            
-            html = await page.content()
-            if "Please enter Password" not in html and "Set Login Password" not in html:
-                log(email, "✅ Login completato!")
-                return True
-            
-        except Exception as e:
-            log(email, f"⚠️ Errore tentativo {tentativo+1}: {e}")
-            await asyncio.sleep(5)
-    
-    log(email, "❌ Login fallito dopo 3 tentativi")
-    return False
-
-# ============================================================
-# SURF CYCLE
-# ============================================================
-
-async def surf_cycle(page, email):
-    """Esegue un singolo ciclo di surf per un account"""
-    
-    log(email, f"🔄 CICLO")
-    
-    await page.goto(f"https://antautosurf.com/surf.php?wallet={email}")
-    await asyncio.sleep(0)
-    
-    page_text = await page.content()
-    
-    if "--_--" not in page_text:
-        await asyncio.sleep(5)
-        return False
-    
-    parts = page_text.split("--_--")
-    if len(parts) < 4:
-        return False
-    
-    ad_url = parts[0].strip()
-    time_val = int(parts[1])
-    
-    log(email, f"   📢 Annuncio! Timer: {time_val}s")
-    
-    for i in range(time_val, 0, -1):
-        print(f"[{email[:10]}] ⏳ {i}s", end="\r")
-        await asyncio.sleep(0)
-        await asyncio.sleep(1)
-    
-    print(" " * 30, end="\r")
-    log(email, f"   ✅ Timer completato!")
-    return True
-
-# ============================================================
-# GESTISCI ACCOUNT - CON GESTIONE PROXY INTELLIGENTE
-# ============================================================
-
-async def gestisci_account(account_data):
-    """
-    Gestisce un singolo account per UN CICLO di surf.
-    Proxy: se fallisce → torna disponibile, se successo → cancellato
-    """
-    
+def esegui_account(account_data):
     email = account_data["email"]
     password = account_data["password"]
     
     log(email, "🚀 Avvio account...")
     
-    # 🔥 1. PRENDI PROXY (NON CANCELLATO!)
-    proxy_str, proxy_id = await prendi_proxy()
-    if not proxy_str:
-        log(email, "❌ Nessun proxy disponibile!")
+    proxy = ottieni_proxy_libero()
+    if not proxy:
+        log(email, "❌ Nessun proxy libero trovato!")
         return
     
-    proxy_config = parse_proxy(proxy_str)
-    if not proxy_config:
-        log(email, "❌ Proxy non valido!")
-        await rilascia_proxy(proxy_id)  # Rilascia (torna disponibile)
-        return
+    proxy_config = {"server": f"http://{proxy['host']}:{proxy['port']}"}
+    log(email, f"🌐 Proxy: {proxy['host']}:{proxy['port']}")
     
-    log(email, f"🌐 Proxy: {proxy_str.split('@')[1] if '@' in proxy_str else proxy_str}")
+    phash_db = carica_database()
     
-    successo = False  # 🔥 Traccia se il ciclo è riuscito
-    
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
             headless=HEADLESS,
             proxy=proxy_config,
             args=['--disable-blink-features=AutomationControlled']
         )
         
-        context = await browser.new_context()
-        page = await context.new_page()
+        context = browser.new_context()
+        page = context.new_page()
         
         try:
             # LOGIN
-            if not await login_con_retry(page, email, password):
-                await rilascia_proxy(proxy_id)
-                return
+            log(email, "📧 Login...")
+            page.goto("https://antautosurf.com/", wait_until="domcontentloaded", timeout=30000)
+            time.sleep(2)
+            
+            page.fill('input[name="bitcoinwallet"]', email)
+            page.click('input[type="submit"][value*="Enter"]')
+            time.sleep(3)
+            
+            html = page.content()
+            
+            if "Set Login Password" in html:
+                log(email, "📝 Nuovo account! Registro...")
+                page.fill('input[name="password"]', password)
+                page.fill('input[name="passwordb"]', password)
+                match = re.search(r'name="confirm2" value="(\d+)"', html)
+                if match:
+                    confirm2 = match.group(1)
+                    page.goto(f"https://antautosurf.com/index.php?password={password}&passwordb={password}&confirm2={confirm2}")
+                    time.sleep(3)
+                    log(email, "   ✅ Password impostata!")
+                    html = page.content()
+            
+            if "Please enter Password" in html:
+                log(email, "🔑 Login con password...")
+                page.fill('input[name="password"]', password)
+                page.click('input[value="Enter"]')
+                time.sleep(3)
+            
+            log(email, "✅ Login completato!")
             
             # DASHBOARD
-            await page.goto(f"https://antautosurf.com/index.php?bitcoinwallet={email}&ref=")
-            await asyncio.sleep(0)
+            log(email, "📊 Dashboard...")
+            page.goto(f"https://antautosurf.com/index.php?bitcoinwallet={email}&ref=", wait_until="networkidle", timeout=30000)
+            time.sleep(3)
+            html = page.content()
             
-            # CAPTCHA
-            await risolvi_captcha(page, email)
+            if "Please Click Similar" in html:
+                log(email, "⚠️ CAPTCHA RILEVATO!")
+                if not risolvi_captcha(page, email, phash_db):
+                    log(email, "❌ Captcha non risolto!")
+                    return
             
-            # BALANCE
-            html = await page.content()
             balance_match = re.search(r'btoday["\']?\s*[=:]\s*([\d.]+)', html)
             if balance_match:
                 log(email, f"💰 Balance: {balance_match.group(1)}")
             
-            # 🔥 SURF - SE ARRIVA QUI, HA FUNZIONATO
-            await surf_cycle(page, email)
+            csrf_match = re.search(r'csrf_token=([a-f0-9]+)', html)
+            if not csrf_match:
+                log(email, "❌ CSRF non trovato!")
+                return
             
-            log(email, "✅ Ciclo completato, passo al prossimo account")
-            successo = True  # 🔥 MARK SUCCESSO!
+            csrf = csrf_match.group(1)
+            log(email, f"🎫 CSRF: {csrf[:16]}...")
+            
+            # SURF
+            log(email, "🚀 Avvio surf...")
+            
+            key = ""
+            time_val = 12
+            ad_id = ""
+            cycle = 0
+            MAX_CYCLES = 10
+            csrf_invalidi = 0
+            MAX_CSRF_INVALIDI = 5
+            
+            while cycle < MAX_CYCLES:
+                cycle += 1
+                log(email, f"🔄 CICLO {cycle}")
+                
+                if ad_id:
+                    ad_id_pulito = re.sub(r'<[^>]+>', '', ad_id)
+                    ad_id_pulito = re.sub(r'[<>\'"]', '', ad_id_pulito)
+                    match = re.search(r'(\d+)', ad_id_pulito)
+                    ad_id_pulito = match.group(1) if match else ""
+                else:
+                    ad_id_pulito = ""
+                
+                params = {
+                    "wallet": email,
+                    "key": key,
+                    "time": time_val,
+                    "ad_id": ad_id_pulito,
+                    "isitbad": 0,
+                    "csrf_token": csrf
+                }
+                
+                url = "https://antautosurf.com/surf.php?" + "&".join([f"{k}={v}" for k, v in params.items()])
+                
+                try:
+                    page.goto(url, wait_until="domcontentloaded", timeout=30000)
+                except:
+                    continue
+                
+                page_text = page.content()
+                
+                if "Invalid CSRF token" in page_text:
+                    csrf_invalidi += 1
+                    log(email, f"❌ CSRF invalido! ({csrf_invalidi}/{MAX_CSRF_INVALIDI})")
                     
+                    if csrf_invalidi >= MAX_CSRF_INVALIDI:
+                        log(email, "🔄 Troppi CSRF invalidi!")
+                        return
+                    
+                    page.goto(f"https://antautosurf.com/index.php?bitcoinwallet={email}&ref=", wait_until="networkidle", timeout=30000)
+                    time.sleep(2)
+                    html = page.content()
+                    csrf_match = re.search(r'csrf_token=([a-f0-9]+)', html)
+                    if csrf_match:
+                        csrf = csrf_match.group(1)
+                        csrf_invalidi = 0
+                        log(email, f"🎫 Nuovo CSRF: {csrf[:16]}...")
+                    continue
+                else:
+                    csrf_invalidi = 0
+                
+                if "--_--" not in page_text:
+                    time.sleep(5)
+                    continue
+                
+                parts = page_text.split("--_--")
+                if len(parts) < 4:
+                    continue
+                
+                ad_url = re.sub(r'<[^>]+>', '', parts[0]).strip()
+                ad_url = re.sub(r'[<>\'"]', '', ad_url)
+                time_val = int(parts[1])
+                key = parts[2]
+                ad_id = parts[3]
+                
+                if "connection.php" in ad_url:
+                    log(email, "   📂 Test anti-bot...")
+                    for i in range(time_val, 0, -1):
+                        print(f"[{email[:10]}] ⏳ {i}s", end="\r")
+                        time.sleep(1)
+                    print("   " * 20, end="\r")
+                    continue
+                
+                log(email, f"   📢 Annuncio reale! Timer: {time_val}s")
+                
+                try:
+                    new_page = context.new_page()
+                    new_page.goto(ad_url, wait_until="domcontentloaded", timeout=10000)
+                    time.sleep(1)
+                except:
+                    pass
+                
+                for i in range(time_val, 0, -1):
+                    print(f"[{email[:10]}] ⏳ {i}s", end="\r")
+                    time.sleep(1)
+                print("   " * 20, end="\r")
+                log(email, f"   ✅ Timer completato!")
+                
+                try:
+                    new_page.close()
+                except:
+                    pass
+                
+                if cycle % 3 == 0:
+                    page.goto(f"https://antautosurf.com/index.php?bitcoinwallet={email}&ref=", wait_until="networkidle", timeout=30000)
+                    time.sleep(2)
+                    html = page.content()
+                    csrf_match = re.search(r'csrf_token=([a-f0-9]+)', html)
+                    if csrf_match:
+                        csrf = csrf_match.group(1)
+                        log(email, f"   🎫 CSRF aggiornato: {csrf[:16]}...")
+            
+            log(email, f"✅ Completati {MAX_CYCLES} cicli, passo al prossimo account")
+            
         except Exception as e:
             log(email, f"❌ Errore: {e}")
-            await rilascia_proxy(proxy_id)  # Rilascia (torna disponibile)
         finally:
-            await browser.close()
-            
-            # 🔥 SOLO SE HA AVUTO SUCCESSO, CANCELLA IL PROXY!
-            if successo:
-                await cancella_proxy(proxy_id)
-            else:
-                await rilascia_proxy(proxy_id)  # Già rilasciato, ma per sicurezza
+            browser.close()
 
 # ============================================================
-# MAIN - LOOP INFINITO CON ROTAZIONE ACCOUNT
+# MAIN - GESTISCE 6 ACCOUNT IN SEQUENZA
 # ============================================================
 
-async def main():
+def main():
     print("="*60)
-    print(f"🚀 BOT V2 - SUPABASE ({WORKER_ID})")
+    print("🚀 BOT MULTI-ACCOUNT V3 - PROXY POOL CONDIVISO")
     print("="*60)
     
     accounts = carica_accounts()
@@ -396,27 +431,20 @@ async def main():
     
     print(f"📋 Account: {len(accounts)}")
     print(f"🔇 Headless: {HEADLESS}")
-    print(f"📦 Worker: {WORKER_ID}")
+    print("="*60)
+    print("🔄 Ogni proxy usato viene bloccato per 24 ore")
+    print("🔄 Proxy automatici da API pubbliche")
     print("="*60)
     
-    # Mostra statistiche iniziali
-    await ottieni_statistiche()
-    print("="*60)
-    
-    # 🔥 LOOP INFINITO - ROTAZIONE ACCOUNT
     while True:
         for account in accounts:
-            await gestisci_account(account)
-            await asyncio.sleep(2)
+            esegui_account(account)
+            time.sleep(5)
             print("─" * 60)
-            
-            # Ogni 5 cicli, mostra statistiche
-            if accounts.index(account) == 0:
-                await ottieni_statistiche()
 
 if __name__ == "__main__":
     try:
-        asyncio.run(main())
+        main()
     except KeyboardInterrupt:
         print("\n🛑 Arresto manuale...")
         sys.exit(0)
