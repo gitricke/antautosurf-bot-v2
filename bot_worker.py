@@ -198,7 +198,7 @@ def ottieni_proxy_ibrido(email, proxy_pool, used_proxies):
             print(f"[{email[:10]}...] ⚠️ Proxy pubblico fallito ({fallimenti+1}/3)")
             return None
     
-    # 2. SE FALLIMENTI >= 3 → USA PROXY PROXYSCRAPE
+    # 2. SE FALLIMENTI >= 1 → USA PROXY PROXYSCRAPE
     print(f"[{email[:10]}...] ⚠️ 3 tentativi pubblici falliti, passo a ProxyScrape...")
     
     if proxy_pool:
