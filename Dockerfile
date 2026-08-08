@@ -54,6 +54,7 @@ WORKDIR /app
 COPY bot_worker.py .
 COPY accounts.json .
 COPY hash_phash_db.json .
+COPY proxy_pool.json .
 
 # ============================================================
 # COMANDO DI AVVIO
