@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-# bot_worker.py - BOT MULTI-ACCOUNT V3 CON PROXY POOL CONDIVISO
-# 6 account in sequenza, proxy automatici da API pubbliche
+# bot_worker.py - BOT MULTI-ACCOUNT IBRIDO (PUBBLICI + PROXYSCRAPE)
 
 import os
 import time
@@ -21,32 +20,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 HEADLESS = True
 ACCOUNTS_FILE = "accounts.json"
+PROXIES_FILE = "proxy_pool.json"
 
 # ============================================================
-# PROXY POOL - TRACCIA PROXY USATI (BLOCCO 24 ORE)
-# ============================================================
-
-PROXY_POOL = {}  # { "ip:port": timestamp_uso }
-
-def proxy_e_bloccato(proxy):
-    """Verifica se un proxy è già stato usato nelle ultime 24 ore"""
-    key = f"{proxy['host']}:{proxy['port']}"
-    if key in PROXY_POOL:
-        tempo_trascorso = time.time() - PROXY_POOL[key]
-        if tempo_trascorso < 86400:  # 24 ore
-            return True
-        else:
-            del PROXY_POOL[key]
-    return False
-
-def segna_proxy_usato(proxy):
-    """Segna un proxy come usato (bloccato per 24 ore)"""
-    key = f"{proxy['host']}:{proxy['port']}"
-    PROXY_POOL[key] = time.time()
-    print(f"📌 Proxy {key} segnato come usato (bloccato 24h)")
-
-# ============================================================
-# CARICA ACCOUNT
+# CARICA ACCOUNT E PROXY
 # ============================================================
 
 def carica_accounts():
@@ -57,13 +34,61 @@ def carica_accounts():
         print(f"❌ File {ACCOUNTS_FILE} non trovato!")
         return []
 
+def carica_proxy_pool():
+    try:
+        with open(PROXIES_FILE, "r") as f:
+            data = json.load(f)
+            return data.get("proxies", [])
+    except:
+        print(f"❌ File {PROXIES_FILE} non trovato!")
+        return []
+
+def parse_proxy(proxy_str):
+    try:
+        auth, host = proxy_str.split('@')
+        user, password = auth.split(':')
+        return {
+            "server": f"http://{host}",
+            "username": user,
+            "password": password
+        }
+    except:
+        return None
+
 # ============================================================
-# LOGGING
+# PROXY POOL - TRACCIA PROXY USATI (BLOCCO 24 ORE)
 # ============================================================
 
-def log(email, msg):
-    prefix = email[:10] if email else "SISTEMA"
-    print(f"[{datetime.now().strftime('%H:%M:%S')}] [{prefix}...] {msg}", flush=True)
+PROXY_POOL_USATI = {}  # { "ip:port": timestamp_uso }
+
+def proxy_e_bloccato(proxy):
+    """Verifica se un proxy è già stato usato nelle ultime 24 ore"""
+    key = f"{proxy['host']}:{proxy['port']}"
+    if key in PROXY_POOL_USATI:
+        tempo_trascorso = time.time() - PROXY_POOL_USATI[key]
+        if tempo_trascorso < 86400:  # 24 ore
+            return True
+        else:
+            del PROXY_POOL_USATI[key]
+    return False
+
+def segna_proxy_usato(proxy):
+    """Segna un proxy come usato (bloccato per 24 ore)"""
+    if isinstance(proxy, dict):
+        key = f"{proxy['host']}:{proxy['port']}"
+    else:
+        # Se è una stringa, estrai host:port
+        try:
+            parts = proxy.split('@')
+            if len(parts) > 1:
+                host_port = parts[1]
+            else:
+                host_port = proxy
+            key = host_port
+        except:
+            key = proxy
+    PROXY_POOL_USATI[key] = time.time()
+    print(f"📌 Proxy {key} segnato come usato (bloccato 24h)")
 
 # ============================================================
 # PROXY FINDER - DA API PUBBLICHE
@@ -129,12 +154,10 @@ def verifica_proxy(proxy, timeout=5):
         pass
     return proxy, False
 
-def ottieni_proxy_libero():
-    """Ottiene un proxy che NON è stato usato nelle ultime 24 ore"""
-    
+def trova_proxy_pubblico_libero():
+    """Trova un proxy pubblico NON bloccato"""
     proxy_list = ottieni_proxy_pubblici()
     if not proxy_list:
-        log("", "❌ Nessun proxy trovato!")
         return None
     
     for proxy in proxy_list:
@@ -144,9 +167,61 @@ def ottieni_proxy_libero():
                 segna_proxy_usato(proxy_ok)
                 return proxy_ok
     
-    log("", "⏳ Tutti i proxy sono bloccati, aspetto 60 secondi...")
-    time.sleep(60)
     return None
+
+# ============================================================
+# OTTIENI PROXY IBRIDO (PUBBLICI + PROXYSCRAPE)
+# ============================================================
+
+def ottieni_proxy_ibrido(email, proxy_pool, used_proxies):
+    """
+    Sistema ibrido:
+    1. Prima cerca proxy PUBBLICI (gratis)
+    2. Se non funzionano, usa proxy PROXYSCRAPE (dal pool)
+    """
+    
+    # 1. CERCA PROXY PUBBLICI
+    print(f"[{email[:10]}...] 🔍 Cerco proxy pubblico...")
+    proxy_pubblico = trova_proxy_pubblico_libero()
+    
+    if proxy_pubblico:
+        print(f"[{email[:10]}...] ✅ Proxy pubblico trovato: {proxy_pubblico['host']}:{proxy_pubblico['port']}")
+        return {
+            "type": "public",
+            "proxy": proxy_pubblico,
+            "config": {
+                "server": f"http://{proxy_pubblico['host']}:{proxy_pubblico['port']}"
+            },
+            "string": f"{proxy_pubblico['host']}:{proxy_pubblico['port']}"
+        }
+    
+    # 2. CERCA PROXY PROXYSCRAPE (se quelli pubblici non funzionano)
+    print(f"[{email[:10]}...] ⚠️ Proxy pubblici non disponibili, cerco ProxyScrape...")
+    
+    for proxy in proxy_pool:
+        if proxy["account"] == email and proxy["proxy"] not in used_proxies:
+            proxy_config = parse_proxy(proxy["proxy"])
+            if proxy_config:
+                print(f"[{email[:10]}...] ✅ Proxy ProxyScrape trovato: {proxy['proxy'].split('@')[1]}")
+                # Segna come usato
+                segna_proxy_usato(proxy['proxy'])
+                return {
+                    "type": "proxyscrape",
+                    "proxy": proxy["proxy"],
+                    "config": proxy_config,
+                    "string": proxy["proxy"]
+                }
+    
+    print(f"[{email[:10]}...] ❌ Nessun proxy disponibile!")
+    return None
+
+# ============================================================
+# LOGGING
+# ============================================================
+
+def log(email, msg):
+    prefix = email[:10] if email else "SISTEMA"
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] [{prefix}...] {msg}", flush=True)
 
 # ============================================================
 # CARICA DATABASE PHASH
@@ -214,19 +289,26 @@ def risolvi_captcha(page, email, phash_db):
 # GESTISCI UN SINGOLO ACCOUNT
 # ============================================================
 
-def esegui_account(account_data):
+def esegui_account(account_data, proxy_pool):
     email = account_data["email"]
     password = account_data["password"]
     
     log(email, "🚀 Avvio account...")
     
-    proxy = ottieni_proxy_libero()
-    if not proxy:
-        log(email, "❌ Nessun proxy libero trovato!")
+    used_proxies = []
+    
+    # 🔥 OTTIENI PROXY IBRIDO (PUBBLICO + PROXYSCRAPE)
+    proxy_data = ottieni_proxy_ibrido(email, proxy_pool, used_proxies)
+    
+    if not proxy_data:
+        log(email, "❌ Nessun proxy disponibile!")
         return
     
-    proxy_config = {"server": f"http://{proxy['host']}:{proxy['port']}"}
-    log(email, f"🌐 Proxy: {proxy['host']}:{proxy['port']}")
+    proxy_config = proxy_data["config"]
+    proxy_str = proxy_data["string"]
+    proxy_type = proxy_data["type"]
+    
+    log(email, f"🌐 Proxy: {proxy_str} ({proxy_type})")
     
     phash_db = carica_database()
     
@@ -234,7 +316,10 @@ def esegui_account(account_data):
         browser = p.chromium.launch(
             headless=HEADLESS,
             proxy=proxy_config,
-            args=['--disable-blink-features=AutomationControlled']
+            args=[
+                '--disable-blink-features=AutomationControlled',
+                '--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+            ]
         )
         
         context = browser.new_context()
@@ -416,12 +501,12 @@ def esegui_account(account_data):
             browser.close()
 
 # ============================================================
-# MAIN - GESTISCE 6 ACCOUNT IN SEQUENZA
+# MAIN
 # ============================================================
 
 def main():
     print("="*60)
-    print("🚀 BOT MULTI-ACCOUNT V3 - PROXY POOL CONDIVISO")
+    print("🚀 BOT MULTI-ACCOUNT IBRIDO (PUBBLICI + PROXYSCRAPE)")
     print("="*60)
     
     accounts = carica_accounts()
@@ -429,16 +514,22 @@ def main():
         print("❌ Nessun account trovato!")
         return
     
+    proxy_pool = carica_proxy_pool()
+    if not proxy_pool:
+        print("⚠️ Nessun proxy ProxyScrape trovato, uso solo proxy pubblici")
+        proxy_pool = []
+    
     print(f"📋 Account: {len(accounts)}")
+    print(f"📋 Proxy ProxyScrape: {len(proxy_pool)}")
     print(f"🔇 Headless: {HEADLESS}")
     print("="*60)
-    print("🔄 Ogni proxy usato viene bloccato per 24 ore")
-    print("🔄 Proxy automatici da API pubbliche")
+    print("🔄 1. Cerca proxy PUBBLICI (gratis)")
+    print("🔄 2. Se non funzionano → usa proxy PROXYSCRAPE")
     print("="*60)
     
     while True:
         for account in accounts:
-            esegui_account(account)
+            esegui_account(account, proxy_pool)
             time.sleep(5)
             print("─" * 60)
 
