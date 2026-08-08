@@ -166,7 +166,7 @@ def trova_proxy_pubblico_libero():
     return None
 
 # ============================================================
-# PROXY IBRIDO CON CONTATORE FALLIMENTI (CORRETTO)
+# PROXY IBRIDO CON CONTATORE FALLIMENTI
 # ============================================================
 
 FALLIMENTI_PROXY = {}  # { "account": count }
@@ -208,7 +208,7 @@ def ottieni_proxy_ibrido(email, proxy_pool, used_proxies):
                 if proxy_config:
                     print(f"[{email[:10]}...] ✅ Proxy ProxyScrape: {proxy['proxy'].split('@')[1]}")
                     segna_proxy_usato(proxy['proxy'])
-                    used_proxies.append(proxy['proxy'])  # 🔥 AGGIUNGI A USED
+                    used_proxies.append(proxy['proxy'])
                     FALLIMENTI_PROXY[email] = 0
                     return {
                         "type": "proxyscrape",
@@ -291,7 +291,7 @@ def risolvi_captcha(page, email, phash_db):
     return False
 
 # ============================================================
-# GESTISCI UN SINGOLO ACCOUNT
+# GESTISCI UN SINGOLO ACCOUNT (CON TRACCIAMENTO SUCCESSO)
 # ============================================================
 
 def esegui_account(account_data, proxy_pool):
@@ -302,7 +302,7 @@ def esegui_account(account_data, proxy_pool):
     
     used_proxies = []
     
-    # 🔥 OTTIENI PROXY IBRIDO (con contatore fallimenti)
+    # OTTIENI PROXY IBRIDO
     proxy_data = ottieni_proxy_ibrido(email, proxy_pool, used_proxies)
     
     if not proxy_data:
@@ -316,6 +316,9 @@ def esegui_account(account_data, proxy_pool):
     log(email, f"🌐 Proxy: {proxy_str} ({proxy_type})")
     
     phash_db = carica_database()
+    
+    # 🔥 TRACCIA SE IL SURF HA AVUTO SUCCESSO
+    surf_successo = False
     
     with sync_playwright() as p:
         browser = p.chromium.launch(
@@ -469,7 +472,9 @@ def esegui_account(account_data, proxy_pool):
                     print("   " * 20, end="\r")
                     continue
                 
+                # 🔥 ANNUNCIO REALE TROVATO!
                 log(email, f"   📢 Annuncio reale! Timer: {time_val}s")
+                surf_successo = True
                 
                 try:
                     new_page = context.new_page()
@@ -504,6 +509,17 @@ def esegui_account(account_data, proxy_pool):
             log(email, f"❌ Errore: {e}")
         finally:
             browser.close()
+            
+            # 🔥 SE IL PROXY ERA PUBBLICO E HA FALLITO, INCREMENTA IL CONTATORE
+            if proxy_type == "public" and not surf_successo:
+                FALLIMENTI_PROXY[email] = FALLIMENTI_PROXY.get(email, 0) + 1
+                log(email, f"⚠️ Proxy pubblico fallito ({FALLIMENTI_PROXY[email]}/1)")
+            elif proxy_type == "public" and surf_successo:
+                # Se ha funzionato, resetta il contatore
+                FALLIMENTI_PROXY[email] = 0
+                log(email, f"✅ Proxy pubblico funzionante! Contatore resettato")
+            elif proxy_type == "proxyscrape" and surf_successo:
+                log(email, f"✅ Proxy ProxyScrape funzionante!")
 
 # ============================================================
 # MAIN
